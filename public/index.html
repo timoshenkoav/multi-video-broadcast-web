@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Multi video broadcast</title>    
+    <script src="https://www.gstatic.com/firebasejs/6.1.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/6.1.0/firebase-database.js"></script>
+    <script src="https://rtcmulticonnection.herokuapp.com/dist/RTCMultiConnection.min.js"></script>
+    <script src="https://rtcmulticonnection.herokuapp.com/node_modules/webrtc-adapter/out/adapter.js"></script>
+    <script src="https://rtcmulticonnection.herokuapp.com/socket.io/socket.io.js"></script>
+    <script>
+      function debug(message){
+        console.log(message);
+      }
+      class Broadcast{
+        constructor(options) {
+          this.streamPublished = options.streamPublished;
+        }
+        createConnection(videoElem,streamId){
+          return new Promise((resolve,reject)=>{
+            this.connection = new RTCMultiConnection();
+            this.connection.socketURL = 'https://rtcmulticonnection.herokuapp.com:443/';
+            this.connection.socketMessageEvent = 'video-broadcast-demo';
+            this.connection.sdpConstraints.mandatory = {
+                OfferToReceiveAudio: false,
+                OfferToReceiveVideo: false
+            };
+
+            this.connection.onbeforeunload = (event)=>{
+              debug('onbeforeunload');
+            };
+            this.connection.onclose = (event)=>{
+              debug('onclose');
+              $(event.mediaElement).remove();
+            };
+            this.connection.onleave = (event)=>{
+              debug('onleave');
+            };
+            this.connection.onstream = (event)=> {
+              debug(`onstream ${event.type}`);
+              this.videoPreview = event.mediaElement;
+              if(event.type === 'local') {
+
+                event.mediaElement.removeAttribute('controls');
+                $(event.mediaElement).appendTo($(videoElem));
+                this.videoPreview.muted = true;
+                this.videoPreview.volume = 0;
+                try {
+                    this.videoPreview.setAttributeNode(document.createAttribute('muted'));
+                } catch (e) {
+                    this.videoPreview.setAttribute('muted', true);
+                }
+
+              }else{
+                this.videoPreview = event.mediaElement;
+                this.videoPreview.muted=false;
+                this.videoPreview.setAttribute('muted', false);
+                event.mediaElement.removeAttribute('controls');
+                $(event.mediaElement).appendTo($(videoElem));
+              }
+              this.videoPreview.srcObject = event.stream;
+              setTimeout(function(){
+                // event.mediaElement.play();
+              },5000);
+
+              $(videoElem).removeClass('loading');
+            };
+            this.connection.onstreamended = (event)=> {
+              debug(`onstreamended ${event.type}`);
+              $(event.mediaElement).remove();
+            };
+
+            resolve();
+          })
+        }
+        _handleClose(videoElem,streamId){
+          if (this.connection){
+            this.connection.getAllParticipants().forEach((pid)=> {
+                 this.connection.disconnectWith(pid);
+            });
+
+             // stop all local cameras
+            this.connection.attachStreams.forEach((localStream)=> {
+              localStream.stop();
+            });
+
+             // close socket.io connection
+            this.connection.closeSocket();
+            this.connection = null;
+          }
+          if (this.streamPublished){
+            this.streamPublished(streamId);
+          }
+        }
+        videoStream(){
+          let ret = null;
+          this.connection.attachStreams.forEach((stream)=>{
+            if (stream.getVideoTracks().length){
+              ret = stream;
+            }
+          });
+          return ret;
+        }
+        micStream(){
+          let ret = null;
+          this.connection.attachStreams.forEach((stream)=>{
+            if (stream.getAudioTracks().length){
+              ret = stream;
+            }
+          });
+          return ret;
+        }
+        isStreamingVideo(){
+          let ret = false;
+          this.connection.attachStreams.forEach((stream)=>{
+            ret|=stream.getVideoTracks().length > 0;
+          });
+          return ret;
+        }
+        isStreamingMic(){
+          let ret = false;
+          this.connection.attachStreams.forEach((stream)=>{
+            ret|=stream.getAudioTracks().length > 0;
+          });
+          return ret;
+        }
+        startStreaming(videoElem, streamId, model,userId){
+          if (!this.connection){
+            if (!model.mic && !model.video){
+              return;
+            }
+            $(videoElem).addClass('loading');
+            this.createConnection(videoElem,streamId).then(()=>{
+              if (model.video){
+                this.connection.mediaConstraints = {
+                  audio: model.mic,
+                  video: {
+                    width: 320,
+                    height: 240
+                  },
+                };
+              }else {
+                this.connection.mediaConstraints = {
+                  audio: true,
+                  video: false,
+                };
+              }
+
+              this.connection.session = {
+                  audio: model.mic,
+                  video: model.video,
+                  oneway: true
+              };
+              this.connection.open(streamId, () =>{
+                debug('connection.opened');
+                debug('streamPublished');
+                if (this.streamPublished){
+                  this.streamPublished(streamId);
+                }
+                // this._handleMute(streamId, model);
+              });
+
+            });
+          }else{
+            if (model.mic || model.video){
+              if (model.video && !this.isStreamingVideo()){
+                  this.connection.sdpConstraints.mandatory = {
+                      OfferToReceiveAudio: false,
+                      OfferToReceiveVideo: true
+                  };
+                  this.connection.session = {
+                      audio: false,
+                      video: true
+                  };
+                  this.connection.mediaConstraints = {
+                      audio: false,
+                      video: {
+                        width: 320,
+                        height: 240
+                      }
+                  };
+                  this.connection.addStream({video:true, oneway:true});
+              }
+              if (model.mic && !this.isStreamingMic()){
+                  this.connection.sdpConstraints.mandatory = {
+                      OfferToReceiveAudio: true,
+                      OfferToReceiveVideo: false
+                  };
+                  this.connection.session = {
+                      audio: true,
+                      video: false
+                  };
+                  this.connection.mediaConstraints = {
+                      audio: true,
+                      video: false
+                  };
+                  this.connection.addStream({audio:true, oneway:true});
+              }
+              if (!model.video && this.isStreamingVideo()){
+                const video = this.videoStream();
+                video.stop();
+              }
+              if (!model.mic && this.isStreamingMic()){
+                const mic = this.micStream();
+                mic.stop();
+              }
+              this._handleMute(streamId, model);
+            }else{
+              $(this.videoElem).removeClass('loading');
+              this._handleClose(videoElem,streamId);
+              $(this.videoElem).find('video,audio').remove();
+            }
+          }
+        }
+        playStream(videoElem,streamId){
+          $(videoElem).addClass('loading');
+          this.createConnection(videoElem,streamId).then(()=>{
+            this.connection.sdpConstraints.mandatory = {
+                OfferToReceiveAudio: true,
+                OfferToReceiveVideo: true
+            };
+            this.connection.session = {
+                audio: true,
+                video: true,
+                oneway: true
+            };
+            this.connection.join(streamId);
+          });
+        }
+      }
+    </script>
+    <script
+      src="https://code.jquery.com/jquery-3.4.1.min.js"
+      integrity="sha256-CSXorXvZcTkaix6Yvo6HppcZGetbYMGWSFlBw8HfCJo="
+      crossorigin="anonymous"></script>
+      <style>
+        body, html{
+          height: 100%;
+        }
+        .root{
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          height: 100%;
+          padding-top: 100px;
+        }
+      </style>
+  </head>
+  <body>
+
+    <div class="root">
+      <div class="controls">
+        <input type="checkbox" id="audio">Mic</input>
+        <input type="checkbox" id="video">Video</input>
+      </div>
+      <div id="video-container">
+      </div>
+    </div>
+    <script>
+    function generateRandom(length) {
+       var result           = '';
+       var characters       = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+       var charactersLength = characters.length;
+       for ( var i = 0; i < length; i++ ) {
+          result += characters.charAt(Math.floor(Math.random() * charactersLength));
+       }
+       return result;
+    }
+
+      var userId = generateRandom(10);
+
+      var firebaseConfig = {
+       apiKey: /*...*/,
+       authDomain: /*...*/,
+       databaseURL: /*...*/,
+       projectId: /*...*/,
+       storageBucket: /*...*/,
+       messagingSenderId: /*...*/,
+       appId: /*...*/
+      };
+      // Initialize Firebase
+      firebase.initializeApp(firebaseConfig);
+
+      var database = firebase.database();
+      var broadcast = new Broadcast({
+        streamPublished: function(streamId){
+          var child = database.ref('multi-video').child(streamId);
+          child.set(true);
+          child.onDisconnect().remove();
+        }
+      });
+      $('#audio,#video').on('click', function(){
+        debug('audio:' + $('#audio').is(':checked') + ' video:'+$('#video').is(':checked'));
+        var model = {
+          video: $('#video').is(':checked'),
+          mic: $('#audio').is(':checked')
+        }
+        broadcast.startStreaming('#video-container',userId,model,userId);
+
+      });
+      database.ref('multi-video').on('value', function(snapshot){
+        snapshot.forEach(function(elem){
+            if (elem.key !== userId){
+              var remote = new Broadcast({});
+              if ($('#video-container #'+elem.key).length === 0){
+                $('<div id="'+elem.key+'"/>').appendTo($('#video-container'));
+                remote.playStream('#video-container #'+elem.key,elem.key);
+              }
+            }
+        })
+        debug('new value '+ JSON.stringify(snapshot.val()));
+      });
+
+    </script>
+  </body>
+</html>
